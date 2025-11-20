@@ -14,22 +14,17 @@ function header_info {
   / /_/ / __ \/ __ `__ \/ _ \   / /| | / ___/ ___/ / ___/ __/ __ `/ __ \/ __/  / / / /\__ \
  / __  / /_/ / / / / / /  __/  / ___ |(__  |__  ) (__  ) /_/ /_/ / / / / /_   / /_/ /___/ /
 /_/ /_/\____/_/ /_/ /_/\___/  /_/  |_/____/____/_/____/\__/\__,_/_/ /_/\__/   \____//____/
-
 EOF
 }
+
 header_info
 echo -e "\n Loading..."
+
 GEN_MAC=02:$(openssl rand -hex 5 | awk '{print toupper($0)}' | sed 's/\(..\)/\1:/g; s/.$//')
 RANDOM_UUID="$(cat /proc/sys/kernel/random/uuid)"
 VERSIONS=(stable beta dev)
-METHOD=""
-NSAPP="homeassistant-os"
-var_os="homeassistant"
 DISK_SIZE="32G"
 
-for version in "${VERSIONS[@]}"; do
-  eval "$version=$(curl -fsSL https://raw.githubusercontent.com/home-assistant/version/master/stable.json | grep '"ova"' | cut -d '"' -f 4)"
-done
 YW=$(echo "\033[33m")
 BL=$(echo "\033[36m")
 HA=$(echo "\033[1;34m")
@@ -41,7 +36,6 @@ CL=$(echo "\033[m")
 
 BOLD=$(echo "\033[1m")
 BFR="\\r\\033[K"
-HOLD=" "
 TAB="  "
 
 CM="${TAB}✔️${TAB}${CL}"
@@ -64,11 +58,13 @@ ADVANCED="${TAB}🧩${TAB}${CL}"
 CLOUD="${TAB}☁️${TAB}${CL}"
 
 THIN="discard=on,ssd=1,"
+
 set -e
 trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
 trap cleanup EXIT
 trap 'post_update_to_api "failed" "INTERRUPTED"' SIGINT
 trap 'post_update_to_api "failed" "TERMINATED"' SIGTERM
+
 function error_handler() {
   local exit_code="$?"
   local line_number="$1"
@@ -98,8 +94,8 @@ function get_valid_nextid() {
 
 function cleanup_vmid() {
   if qm status $VMID &>/dev/null; then
-    qm stop $VMID &>/dev/null
-    qm destroy $VMID &>/dev/null
+    qm stop $VMID &>/dev/null || true
+    qm destroy $VMID &>/dev/null || true
   fi
 }
 
@@ -111,130 +107,124 @@ function cleanup() {
 
 TEMP_DIR=$(mktemp -d)
 pushd $TEMP_DIR >/dev/null
+
 if whiptail --backtitle "Proxmox VE Helper Scripts" --title "Homeassistant OS VM" --yesno "This will create a New Homeassistant OS VM. Proceed?" 10 58; then
   :
 else
   header_info && echo -e "${CROSS}${RD}User exited script${CL}\n" && exit
 fi
 
-function msg_info() {
-  local msg="$1"
-  echo -ne "${TAB}${YW}${HOLD}${msg}${HOLD}"
-}
-
-function msg_ok() {
-  local msg="$1"
-  echo -e "${BFR}${CM}${GN}${msg}${CL}"
-}
-
-function msg_error() {
-  local msg="$1"
-  echo -e "${BFR}${CROSS}${RD}${msg}${CL}"
-}
+# ---- FUNCIONES DE MENÚ Y DESCARGA ----
+function msg_info() { local msg="$1"; echo -ne "${TAB}${YW}${msg}${CL}"; }
+function msg_ok() { local msg="$1"; echo -e "${BFR}${CM}${GN}${msg}${CL}"; }
+function msg_error() { local msg="$1"; echo -e "${BFR}${CROSS}${RD}${msg}${CL}"; }
 
 function check_root() {
-  if [[ "$(id -u)" -ne 0 || $(ps -o comm= -p $PPID) == "sudo" ]]; then
-    clear
-    msg_error "Please run this script as root."
-    echo -e "\nExiting..."
-    sleep 2
-    exit
+  if [[ "$(id -u)" -ne 0 ]]; then
+    msg_error "Please run as root"
+    exit 1
   fi
-}
-
-# Permitir Proxmox 9.1
-pve_check() {
-  local PVE_VER
-  PVE_VER="$(pveversion | awk -F'/' '{print $2}' | awk -F'-' '{print $1}')"
-
-  # Check for Proxmox VE 8.x
-  if [[ "$PVE_VER" =~ ^8\.([0-9]+) ]]; then
-    local MINOR="${BASH_REMATCH[1]}"
-    if ((MINOR < 0 || MINOR > 9)); then
-      msg_error "This version of Proxmox VE is not supported."
-      msg_error "Supported: Proxmox VE version 8.0 – 8.9"
-      exit 1
-    fi
-    return 0
-  fi
-
-  # Check for Proxmox VE 9.x (permitir 9.0 y 9.1)
-  if [[ "$PVE_VER" =~ ^9\.([0-9]+) ]]; then
-    local MINOR="${BASH_REMATCH[1]}"
-    if ((MINOR != 0 && MINOR != 1)); then
-      msg_error "This script supports Proxmox 9.0 y 9.1"
-      exit 1
-    fi
-    return 0
-  fi
-
-  msg_error "Unsupported version of Proxmox VE."
-  exit 1
 }
 
 function arch_check() {
   if [ "$(dpkg --print-architecture)" != "amd64" ]; then
-    echo -e "\n ${INFO}${YWB}This script will not work with PiMox! \n"
-    echo -e "\n ${YWB}Visit https://github.com/asylumexp/Proxmox for ARM64 support. \n"
-    echo -e "Exiting..."
-    sleep 2
-    exit
+    msg_error "Only amd64 is supported"
+    exit 1
   fi
-}
-
-function ssh_check() {
-  if command -v pveversion >/dev/null 2>&1; then
-    if [ -n "${SSH_CLIENT:+x}" ]; then
-      if whiptail --backtitle "Proxmox VE Helper Scripts" --defaultno --title "SSH DETECTED" --yesno "It's suggested to use the Proxmox shell instead of SSH, since SSH can create issues while gathering variables. Would you like to proceed with using SSH?" 10 62; then
-        echo "you've been warned"
-      else
-        clear
-        exit
-      fi
-    fi
-  fi
-}
-
-function exit-script() {
-  clear
-  echo -e "\n${CROSS}${RD}User exited script${CL}\n"
-  exit
 }
 
 function ensure_pv() {
   if ! command -v pv &>/dev/null; then
-    msg_info "Installing required package: pv"
-    if ! apt-get update -qq &>/dev/null || ! apt-get install -y pv &>/dev/null; then
-      msg_error "Failed to install pv automatically."
-      echo -e "\nPlease run manually on the Proxmox host:\n  apt install pv\n"
-      exit 1
-    fi
-    msg_ok "Installed pv"
+    apt-get update -qq
+    apt-get install -y pv
   fi
 }
 
-# Funciones de descarga, extracción y configuración se mantienen igual
-# ...
+function download_and_validate_xz() {
+  local url="$1"
+  local file="$2"
+  if [[ -s "$file" ]]; then
+    if xz -t "$file" &>/dev/null; then
+      msg_ok "Using cached image $(basename "$file")"
+      return
+    else
+      rm -f "$file"
+    fi
+  fi
+  msg_info "Downloading $(basename "$file")...\n"
+  curl -fSL -o "$file" "$url"
+  if ! xz -t "$file" &>/dev/null; then
+    msg_error "Downloaded file corrupted"
+    rm -f "$file"
+    exit 1
+  fi
+  msg_ok "Downloaded and validated $(basename "$file")"
+}
 
-# --- Adaptación clave para Proxmox 9.1 ---
-# Importar disco con qcow2
-IMPORT_OUT="$(qm disk import $VMID $FILE_IMG $STORAGE --format qcow2 2>&1 || true)"
-DISK_REF="$(printf '%s\n' "$IMPORT_OUT" | sed -n "s/.*successfully imported disk '\([^']\+\)'.*/\1/p" | tr -d "\r\"'")"
+function extract_xz_with_pv() {
+  local file="$1"
+  local target="$2"
+  msg_info "Decompressing $(basename "$file")\n"
+  xz -dc "$file" | pv -N "Extracting" >"$target"
+  msg_ok "Decompressed to $target"
+}
 
-# Asignar disco EFI y root disk
-qm set "$VMID" \
-  --efidisk0 "${STORAGE}:1,efitype=4m" \
-  --scsi0 "${DISK_REF},ssd=1,discard=on" \
-  --boot order=scsi0 \
-  --serial0 socket >/dev/null
-qm set "$VMID" --agent enabled=1 >/dev/null
+# ---- AJUSTES POR DEFECTO ----
+BRANCH="stable"
+VMID=$(get_valid_nextid)
+HN="haos-${VMID}"
+CORE_COUNT=2
+RAM_SIZE=4096
+BRIDGE="vmbr0"
+STORAGE="local-lvm"
+DISK_SIZE="32G"
 
-# Redimensionar disco
-qm resize "$VMID" scsi0 "${DISK_SIZE}" >/dev/null
+# ---- DESCARGA DE IMAGEN ----
+URL="https://github.com/home-assistant/operating-system/releases/download/${BRANCH}/haos_ova-${BRANCH}.qcow2.xz"
+CACHE_DIR="/var/lib/vz/template/cache"
+CACHE_FILE="$CACHE_DIR/$(basename "$URL")"
+FILE_IMG="/var/lib/vz/template/tmp/${CACHE_FILE##*/%.xz}"
 
-# Iniciar VM si corresponde
-if [ "$START_VM" == "yes" ]; then
-  qm start $VMID
+mkdir -p "$CACHE_DIR" "$(dirname "$FILE_IMG")"
+download_and_validate_xz "$URL" "$CACHE_FILE"
+extract_xz_with_pv "$CACHE_FILE" "$FILE_IMG"
+
+# ---- CREAR VM ----
+msg_info "Creating VM shell...\n"
+qm create "$VMID" -machine q35 -bios ovmf -agent 1 -tablet 0 -localtime 1 \
+  -cores "$CORE_COUNT" -memory "$RAM_SIZE" -name "$HN" \
+  -net0 "virtio,bridge=$BRIDGE,macaddr=$GEN_MAC" \
+  -onboot 1 -ostype l26 -scsihw virtio-scsi-pci
+msg_ok "VM shell created"
+
+# ---- CREAR EFI ----
+msg_info "Creating EFI disk...\n"
+qm set "$VMID" --efidisk0 "${STORAGE}:size=512M,format=qcow2,efitype=4m"
+
+# ---- IMPORTAR DISCO ROOT ----
+msg_info "Importing root disk...\n"
+qm importdisk "$VMID" "$FILE_IMG" "$STORAGE" --format qcow2
+
+DISK_REF=$(pvesm list "$STORAGE" | awk -v id="$VMID" '$5 ~ ("vm-"id"-disk-") {print $1}' | tail -n1)
+if [ -z "$DISK_REF" ]; then
+  msg_error "Failed to detect imported disk"
+  exit 1
 fi
+msg_ok "Imported disk: $DISK_REF"
 
-msg_ok "Home Assistant OS VM creada correctamente en Proxmox VE 9.1"
+# ---- ASIGNAR DISCO Y CONFIG ----
+msg_info "Attaching root disk and configuring VM...\n"
+qm set "$VMID" \
+  --scsi0 "$DISK_REF,ssd=1,discard=on" \
+  --boot order=efidisk0,scsi0 \
+  --serial0 socket \
+  --agent enabled=1
+qm resize "$VMID" scsi0 "$DISK_SIZE"
+msg_ok "Disk resized to $DISK_SIZE"
+
+# ---- INICIO ----
+qm start "$VMID"
+msg_ok "Home Assistant OS VM started! VMID=$VMID"
+
+rm -f "$FILE_IMG"
+msg_ok "Temporary files cleaned"
